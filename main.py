@@ -1,9 +1,12 @@
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+
+
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from datetime import datetime, timezone
-from typing import Annotated, Any, Generic, TypeVar
+from typing import Annotated, Any, Generic, Optional, TypeVar
 
 from fastapi.concurrency import asynccontextmanager
 from pydantic import BaseModel
+from sqlalchemy import func
 from sqlmodel import Field, SQLModel, Session, create_engine, select
 class Campaign(SQLModel,table=True):
     campaign_id: int|None = Field(default=None, primary_key=True)
@@ -40,24 +43,51 @@ app=FastAPI(root_path="/api/v1",lifespan=lifespan)
 T=TypeVar("T")
 class Response(BaseModel,Generic[T]):
     data:T
+class PaginatedResponse(BaseModel,Generic[T]):
+    count: int
+    data: T
+    next: Optional[str]
+    previous: Optional[str] 
 
-@app.get("/campaigns",response_model=Response[list[Campaign]])
-async def read_campaings(session: SessionDep):
-    campaigns=session.exec(select(Campaign)).all()
-    return {"data":campaigns}
+@app.get("/campaigns",response_model=PaginatedResponse[list[Campaign]])
+async def read_campaings(session: SessionDep,request:Request,page: int = Query(1, ge=1),page_size: int = Query(5, ge=1, le=100)):
+    limit=page_size
+    offset=(page-1)*limit
+    campaigns=session.exec(select(Campaign).order_by(Campaign.campaign_id).offset(offset).limit(limit)).all() #type: ignore
+    base_url=str(request.url).split("?")[0]
+    total=session.exec(select(func.count()).select_from(Campaign)).one()
+    if offset+limit<total:
+        next_url=f"{base_url}?page={page+1}&page_size={page_size}"
+    else:
+        next_url=None
+    if page>1:
+        prev_url=f"{base_url}?page={page-1}&page_size={page_size}"
+    else:
+        prev_url=None
+
+    return {
+        "count":total,
+        "data":campaigns,
+        "next":next_url,
+        "previous":prev_url
+        }
 @app.get("/campaigns/{id}",response_model=Response[Campaign])
 async def read_campaign(id: int,session: SessionDep):
     campaign=session.get(Campaign, id)
     if not campaign:
         raise HTTPException(status_code=404, detail="Campaign not found")
     return {"data":campaign}
-@app.post("/campaigns",status_code=201,response_model=Response[Campaign])
-async def create_campaign(campaign: CampaignCreate,session: SessionDep):
-    db_campaign=Campaign.model_validate(campaign)
-    session.add(db_campaign)
+@app.post("/campaigns",status_code=201,response_model=Response[list[Campaign]])
+async def create_campaign(campaign: list[CampaignCreate],session: SessionDep):
+    db_campaigns=[]
+    for c in campaign:
+        db_campaign=Campaign.model_validate(c)
+        session.add(db_campaign)
+        db_campaigns.append(db_campaign)
     session.commit()
-    session.refresh(db_campaign)
-    return {"data":db_campaign}
+    for c in db_campaigns:
+        session.refresh(c)
+    return {"data":db_campaigns}
 @app.put("/campaigns/{id}",response_model=Response[Campaign])
 async def update_campaign(id: int, campaign: CampaignCreate, session: SessionDep):
     db_campaign = session.get(Campaign, id)
